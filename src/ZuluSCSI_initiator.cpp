@@ -68,6 +68,9 @@ bool scsiInitiatorReadCapacity(int target_id, uint32_t *sectorcount, uint32_t *s
 // From ZuluSCSI.cpp
 extern bool g_sdcard_present;
 
+// Forward declarations for VPD-dump helpers defined later in this file.
+static void dumpVPDToSDCard(int target_id);
+
 /*************************************
  * High level initiator mode logic   *
  *************************************/
@@ -107,6 +110,10 @@ static struct {
     // VHD output format (opt-in via InitiatorVHD=1)
     bool use_vhd_format;
 
+    // Dump all VPD pages to SD card on first contact (opt-in via InitiatorDumpVPD=1)
+    bool dump_vpd;
+    uint32_t vpd_dumped_targets; // bitmap of targets already dumped in this session
+
     // Negotiated bus width for targets
     int targetBusWidth[S2S_MAX_TARGETS];
 
@@ -134,6 +141,8 @@ void scsiInitiatorInit()
     g_initiator_state.max_retry_count = ini_getl("SCSI", "InitiatorMaxRetry", 5, CONFIGFILE);
     g_initiator_state.use_read10 = ini_getbool("SCSI", "InitiatorUseRead10", false, CONFIGFILE);
     g_initiator_state.use_vhd_format = ini_getbool("SCSI", "InitiatorVHD", false, CONFIGFILE);
+    g_initiator_state.dump_vpd = ini_getbool("SCSI", "InitiatorDumpVPD", false, CONFIGFILE);
+    g_initiator_state.vpd_dumped_targets = 0;
 
     // treat initiator id as already imaged drive so it gets skipped
     g_initiator_state.drives_imaged = 1 << g_initiator_state.initiator_id;
@@ -472,6 +481,16 @@ void scsiInitiatorMainLoop()
                 {
                     filename_extension = ".vhd";
                     logmsg("VHD output enabled for SCSI ID ", g_initiator_state.target_id);
+                }
+
+                // One-shot VPD dump to SD card (opt-in via InitiatorDumpVPD=1).
+                // Runs once per target per session so subsequent main-loop passes
+                // do not re-dump the same pages on every scan.
+                if (g_initiator_state.dump_vpd &&
+                    !(g_initiator_state.vpd_dumped_targets & (1u << g_initiator_state.target_id)))
+                {
+                    dumpVPDToSDCard(g_initiator_state.target_id);
+                    g_initiator_state.vpd_dumped_targets |= (1u << g_initiator_state.target_id);
                 }
             }
 
@@ -1061,6 +1080,162 @@ bool scsiInquiry(int target_id, uint8_t inquiry_data[36])
                                          inquiry_data, 36,
                                          NULL, 0);
     return status == 0;
+}
+
+// Execute INQUIRY with EVPD=1 for a given VPD page_code.
+// Returns the number of bytes the target actually returned (header + payload),
+// clamped to `buflen`, or 0 on CDB failure. Callers should check for >= 4 to
+// know the 4-byte VPD header is valid.
+static int scsiInquiryVPD(int target_id, uint8_t page_code, uint8_t *buf, size_t buflen)
+{
+    size_t alloc = buflen > 255 ? 255 : buflen;
+    if (alloc < 4) return 0;
+    uint8_t command[6] = {0x12, 0x01, page_code, 0, (uint8_t)alloc, 0};
+    memset(buf, 0, buflen);
+    int status = scsiInitiatorRunCommand(target_id,
+                                         command, sizeof(command),
+                                         buf, alloc,
+                                         NULL, 0);
+    if (status != 0) return 0;
+    // VPD header: [qual/type][page_code][page_len_msb][page_len_lsb]
+    size_t payload = ((size_t)buf[2] << 8) | buf[3];
+    size_t total = 4 + payload;
+    if (total > alloc) total = alloc;
+    return (int)total;
+}
+
+// Stream `len` bytes to `f` as space-separated uppercase hex (e.g. "00 FF A3").
+static void writeHexBytesJson(FsFile &f, const uint8_t *data, size_t len)
+{
+    char chunk[4];
+    for (size_t i = 0; i < len; i++)
+    {
+        snprintf(chunk, sizeof(chunk), i == 0 ? "%02X" : " %02X", data[i]);
+        f.print(chunk);
+    }
+}
+
+// Emit one "0xHH": { "length": N, "hex": "..." } entry inside the vpd_pages
+// object. The `first` flag suppresses the leading comma for the first entry.
+static void writePageEntryJson(FsFile &f, uint8_t page_code,
+                               const uint8_t *data, size_t len, bool first)
+{
+    char header[48];
+    snprintf(header, sizeof(header),
+             "%s\n    \"0x%02X\": { \"length\": %u, \"hex\": \"",
+             first ? "" : ",", page_code, (unsigned)len);
+    f.print(header);
+    writeHexBytesJson(f, data, len);
+    f.print("\" }");
+}
+
+// Dump the full standard INQUIRY and every VPD page the target advertises in
+// page 0x00 to a single JSON file on the SD card, named VPD_ID<n>.json.
+// Re-running for the same target clobbers the existing file.
+// Layout:
+//   {
+//     "target_id": <n>,
+//     "timestamp_ms": <millis>,
+//     "standard_inquiry": { "length": N, "hex": "AA BB ..." },
+//     "vpd_pages": {
+//       "0x00": { ... },
+//       "0x01": { ... },
+//       ...
+//     }
+//   }
+static void dumpVPDToSDCard(int target_id)
+{
+    uint8_t buf[260];
+    char filename[24];
+    char line[80];
+
+    logmsg("-- VPD dump: starting for SCSI ID ", target_id);
+
+    snprintf(filename, sizeof(filename), "VPD_ID%d.json", target_id);
+    FsFile f = SD.open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!f.isOpen())
+    {
+        logmsg("-- VPD dump: failed to open ", filename, " for writing");
+        return;
+    }
+
+    f.print("{\n");
+    snprintf(line, sizeof(line),
+             "  \"target_id\": %d,\n  \"timestamp_ms\": %lu,\n",
+             target_id, (unsigned long)millis());
+    f.print(line);
+
+    // 1. Full standard INQUIRY (alloc 252) — the initial scan only read 36 bytes.
+    //    additional_length is at byte 4, so total response = 5 + additional_length.
+    {
+        uint8_t cmd[6] = {0x12, 0, 0, 0, 0xFC, 0};
+        memset(buf, 0, sizeof(buf));
+        int status = scsiInitiatorRunCommand(target_id,
+                                             cmd, sizeof(cmd),
+                                             buf, 252,
+                                             NULL, 0);
+        if (status == 0)
+        {
+            size_t total = 5 + (size_t)buf[4];
+            if (total > 252) total = 252;
+            snprintf(line, sizeof(line),
+                     "  \"standard_inquiry\": { \"length\": %u, \"hex\": \"",
+                     (unsigned)total);
+            f.print(line);
+            writeHexBytesJson(f, buf, total);
+            f.print("\" },\n");
+            logmsg("-- VPD dump: captured standard INQUIRY (", (int)total, " bytes)");
+        }
+        else
+        {
+            logmsg("-- VPD dump: standard INQUIRY (full) failed, status ", status);
+            f.print("  \"standard_inquiry\": null,\n");
+        }
+    }
+
+    // 2. VPD page 0x00 — supported pages list. Without it there is no list of
+    //    pages to iterate, so close the JSON with an empty vpd_pages and stop.
+    int p00_len = scsiInquiryVPD(target_id, 0x00, buf, sizeof(buf));
+    if (p00_len < 4)
+    {
+        logmsg("-- VPD dump: SCSI ID ", target_id, " did not return VPD page 0x00 (EVPD unsupported?)");
+        f.print("  \"vpd_pages\": {}\n}\n");
+        f.close();
+        return;
+    }
+
+    f.print("  \"vpd_pages\": {");
+    writePageEntryJson(f, 0x00, buf, p00_len, true);
+    logmsg("-- VPD dump: captured page ", (uint8_t)0x00, " (", p00_len, " bytes)");
+
+    // Copy the supported-pages list out of buf before scsiInquiryVPD reuses it.
+    uint8_t supported[256];
+    size_t n_supported = ((size_t)buf[2] << 8) | buf[3];
+    if (n_supported > (size_t)(p00_len - 4)) n_supported = p00_len - 4;
+    if (n_supported > sizeof(supported)) n_supported = sizeof(supported);
+    memcpy(supported, &buf[4], n_supported);
+
+    // 3. Each supported VPD page. Failures are skipped without affecting the
+    //    JSON structure — we only emit the comma+entry when a page succeeds.
+    for (size_t i = 0; i < n_supported; i++)
+    {
+        uint8_t page_code = supported[i];
+        if (page_code == 0x00) continue; // already emitted
+
+        int plen = scsiInquiryVPD(target_id, page_code, buf, sizeof(buf));
+        if (plen < 4)
+        {
+            logmsg("-- VPD dump: VPD page ", page_code, " not returned, skipping");
+            continue;
+        }
+        writePageEntryJson(f, page_code, buf, plen, false);
+        logmsg("-- VPD dump: captured page ", page_code, " (", plen, " bytes)");
+    }
+
+    f.print("\n  }\n}\n");
+    f.close();
+
+    logmsg("-- VPD dump: wrote ", filename);
 }
 
 // Execute TEST UNIT READY command and handle unit attention state
