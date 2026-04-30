@@ -268,6 +268,31 @@ static void applyInjection(uint8_t *data, size_t dataLen,
     }
 }
 
+// Right-pad `value` with ASCII spaces and write `fieldLen` bytes into the
+// SPD blob at `fieldOffset`. Silently no-ops when the field would overflow.
+static void patchSpdField(uint8_t *spd, size_t spdLen,
+                          size_t fieldOffset, size_t fieldLen,
+                          const char *value)
+{
+    if (!value || !value[0]) return;
+    if (fieldOffset + fieldLen > spdLen) return;
+    size_t vlen = strlen(value);
+    for (size_t i = 0; i < fieldLen; ++i)
+    {
+        spd[fieldOffset + i] = (i < vlen) ? (uint8_t)value[i] : (uint8_t)' ';
+    }
+}
+
+// Read a string-valued INI key from [SCSI<n>] with fallback to [SCSI]. Returns
+// true when a non-empty value was found in either section. Caller-supplied
+// section name is used for the per-id lookup; the global section is "SCSI".
+static bool readIniStringWithGlobalFallback(const char *idSection, const char *key,
+                                            char *out, size_t outLen)
+{
+    if (ini_gets(idSection, key, "", out, outLen, CONFIGFILE) > 0 && out[0]) return true;
+    return ini_gets("SCSI", key, "", out, outLen, CONFIGFILE) > 0 && out[0];
+}
+
 // Populate default AS/400 inquiry and VPD data from the active profile.
 // Only fills in data that wasn't already provided via INI.
 static void loadAS400Defaults(uint8_t scsiId, S2S_CFG_TYPE type)
@@ -287,6 +312,22 @@ static void loadAS400Defaults(uint8_t scsiId, S2S_CFG_TYPE type)
         {
             applyInjection(g_custom_spd[scsiId].data, len, &profile->spdInjections[i], scsiId);
         }
+
+        // Apply explicit Vendor= / Product= / Version= INI overrides to the
+        // standard inquiry blob. Each is checked first in the per-id section
+        // ([SCSI<n>]) and then in the global [SCSI] section. When neither is
+        // set, the captured profile bytes (vendor "IBMAS400", model-specific
+        // product id, model-specific revision) are kept.
+        char idSection[6] = "SCSI0";
+        idSection[4] = scsiEncodeID(scsiId);
+        char tmp[32];
+        if (readIniStringWithGlobalFallback(idSection, "Vendor",  tmp, sizeof(tmp)))
+            patchSpdField(g_custom_spd[scsiId].data, len, 8,  8,  tmp);
+        if (readIniStringWithGlobalFallback(idSection, "Product", tmp, sizeof(tmp)))
+            patchSpdField(g_custom_spd[scsiId].data, len, 16, 16, tmp);
+        if (readIniStringWithGlobalFallback(idSection, "Version", tmp, sizeof(tmp)))
+            patchSpdField(g_custom_spd[scsiId].data, len, 32, 4,  tmp);
+
         g_custom_spd[scsiId].length = (uint8_t)len;
         loaded_default_data = true;
     }
