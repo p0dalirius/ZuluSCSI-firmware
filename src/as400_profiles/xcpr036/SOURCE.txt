@@ -1,0 +1,49 @@
+XCPR036 / IBM FRU 53P3239 profile data provenance
+=================================================
+
+These captures were taken from a live IBM AS/400 disk attached to a
+SCSI HBA on host scsi-station as /dev/sg1.
+
+  Capture date:    2026-04-30T13:35:45-0400
+  Capture device:  /dev/sg1
+  Tool:            sg_vpd, sg_modes (sg3-utils)
+
+Disk identification (from std INQUIRY):
+  Vendor:          IBMAS400
+  Product:         XCPR036
+  Revision:        1AEB
+  IBM FRU:         53P3239
+  Underlying:      Seagate Cheetah 15K.3 36GB (model ST336753LC)
+
+Files:
+  standard_inquiry.bin  164 B   AS/400 standard INQUIRY response
+  page_00.bin            17 B   Supported VPD pages list
+                                (0x00 0x03 0x80 0x81 0xC0..0xC4 0xC7 0xC8 0xD1 0xD2)
+  page_03.bin            40 B   Vendor reserved
+  page_80.bin            24 B   Unit serial number ("3HX1QZE200007422WMD8")
+  page_81.bin             7 B   Implemented operating definition
+  page_c0.bin            60 B   IBM EC dates / vendor codes
+  page_c1.bin            20 B   IBM date pair
+  page_c2.bin             6 B   IBM vendor reserved
+  page_c3.bin           250 B   Underlying drive identification (ST336753LC)
+  page_c4.bin            10 B   IBM short serial ("0ACD83")
+  page_c7.bin            74 B   IBM vendor reserved
+  page_c8.bin            56 B   IBM vendor reserved
+  page_d1.bin           244 B   IBM EC parts list / disk part number ("9U9006-026")
+  page_d2.bin           244 B   IBM EC tracking
+  mode_sense_all.bin    204 B   Mode sense (all pages) reply, normalised
+
+Mode-sense format note
+----------------------
+sg_modes -a -H emits a 10-byte MODE SENSE response (8-byte header). The
+firmware's AS/400 mode-sense path replies to 6-byte MODE SENSE commands
+(cmd 0x1A) which carry a 4-byte header. The capture was therefore
+re-headered to the 6-byte format before being committed:
+
+    10-byte capture: 208 B, mode_data_length=206
+    6-byte stored:   204 B, mode_data_length=203 (= 0xCB)
+
+Block descriptor confirms 522-byte sectors (consistent with AS/400 BS522).
+
+Re-run utils/bin_to_inc.py src/as400_profiles/xcpr036/ after editing any
+.bin file to refresh the corresponding .inc.

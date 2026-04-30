@@ -20,11 +20,13 @@
 #include <scsi2sd.h>
 
 extern "C" const as400_disk_profile_t as400_profile_dgvs09u;
+extern "C" const as400_disk_profile_t as400_profile_xcpr036;
 
 namespace {
 
 const as400_disk_profile_t *const kProfiles[] = {
     &as400_profile_dgvs09u,
+    &as400_profile_xcpr036,
 };
 constexpr size_t kProfilesLen = sizeof(kProfiles) / sizeof(kProfiles[0]);
 
