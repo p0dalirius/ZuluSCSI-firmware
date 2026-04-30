@@ -33,33 +33,47 @@ namespace {
 #include "page_d2.inc"
 #include "mode_sense_all.inc"
 
-// Std INQUIRY-level injections wired to the legacy AS400_DiskSerialNumber
-// (8-char IBM short serial) and AS400_DiskPartNumber (7-char IBM FRU) keys.
-// XCPR036 has no EBCDIC FRU slot in the standard inquiry, only ASCII at 114.
+// Std INQUIRY-level injections.
+//   offset 36 -> 8-byte zero-prefixed IBM short serial ("000ACD83" form)
+//   offset 114 -> 7-char IBM FRU ASCII ("53P3239" slot)
+// XCPR036 has no EBCDIC FRU slot in the standard inquiry.
 constexpr as400_inject_t kSpdInjections[] = {
     {  36, AS400_INJECT_IBM_SERIAL_8  },
     { 114, AS400_INJECT_IBM_FRU_ASCII },
 };
 
-// VPD-page injections are intentionally empty in this commit. XCPR036 carries
-// the manufacturer 8-char serial in page 0x80 and the IBM 6-char short serial
-// in page 0xC4, but those slots are addressed by tags introduced in a later
-// commit (AS400_DiskSerialNumber-as-manufacturer, AS400_IBMDiskSerialNumber).
+// Page 0x80 carries the 20-char manufacturer-format unit serial; the first
+// 8 chars are the manufacturer prefix (e.g. "3HX1QZE2") and are addressable
+// via AS400_DiskSerialNumber.
+constexpr as400_inject_t kPage80Injections[] = {
+    { 4, AS400_INJECT_MFR_SERIAL_8 },
+};
+
+// Page 0xC4 carries only the 6-char IBM short serial (e.g. "0ACD83").
+constexpr as400_inject_t kPageC4Injections[] = {
+    { 4, AS400_INJECT_IBM_SHORT_SERIAL_6 },
+};
+
+// Page 0xD1 starts with a 10-char manufacturer disk part number
+// (e.g. "9U9006-026") at offset 4.
+constexpr as400_inject_t kPageD1Injections[] = {
+    { 4, AS400_INJECT_MFR_PART_10 },
+};
 
 constexpr as400_vpd_page_t kPages[] = {
-    { 0x00, sizeof(kPage00), kPage00, nullptr, 0 },
-    { 0x03, sizeof(kPage03), kPage03, nullptr, 0 },
-    { 0x80, sizeof(kPage80), kPage80, nullptr, 0 },
-    { 0x81, sizeof(kPage81), kPage81, nullptr, 0 },
-    { 0xC0, sizeof(kPageC0), kPageC0, nullptr, 0 },
-    { 0xC1, sizeof(kPageC1), kPageC1, nullptr, 0 },
-    { 0xC2, sizeof(kPageC2), kPageC2, nullptr, 0 },
-    { 0xC3, sizeof(kPageC3), kPageC3, nullptr, 0 },
-    { 0xC4, sizeof(kPageC4), kPageC4, nullptr, 0 },
-    { 0xC7, sizeof(kPageC7), kPageC7, nullptr, 0 },
-    { 0xC8, sizeof(kPageC8), kPageC8, nullptr, 0 },
-    { 0xD1, sizeof(kPageD1), kPageD1, nullptr, 0 },
-    { 0xD2, sizeof(kPageD2), kPageD2, nullptr, 0 },
+    { 0x00, sizeof(kPage00), kPage00, nullptr,           0 },
+    { 0x03, sizeof(kPage03), kPage03, nullptr,           0 },
+    { 0x80, sizeof(kPage80), kPage80, kPage80Injections, sizeof(kPage80Injections) / sizeof(kPage80Injections[0]) },
+    { 0x81, sizeof(kPage81), kPage81, nullptr,           0 },
+    { 0xC0, sizeof(kPageC0), kPageC0, nullptr,           0 },
+    { 0xC1, sizeof(kPageC1), kPageC1, nullptr,           0 },
+    { 0xC2, sizeof(kPageC2), kPageC2, nullptr,           0 },
+    { 0xC3, sizeof(kPageC3), kPageC3, nullptr,           0 },
+    { 0xC4, sizeof(kPageC4), kPageC4, kPageC4Injections, sizeof(kPageC4Injections) / sizeof(kPageC4Injections[0]) },
+    { 0xC7, sizeof(kPageC7), kPageC7, nullptr,           0 },
+    { 0xC8, sizeof(kPageC8), kPageC8, nullptr,           0 },
+    { 0xD1, sizeof(kPageD1), kPageD1, kPageD1Injections, sizeof(kPageD1Injections) / sizeof(kPageD1Injections[0]) },
+    { 0xD2, sizeof(kPageD2), kPageD2, nullptr,           0 },
 };
 
 } // namespace

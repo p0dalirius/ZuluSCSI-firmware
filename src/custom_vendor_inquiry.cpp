@@ -35,6 +35,7 @@
 #include <minIni.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 // Storage for custom VPD pages: up to 16 entries across all SCSI IDs
 // Each entry: [0]=scsiId, [1]=pageCode, [2]=length, [3..]=data
@@ -56,24 +57,50 @@ static struct {
 } g_custom_spd[S2S_MAX_TARGETS];
 
 #ifdef PLATFORM_AS400
-// Per-SCSI-ID override for the 8-byte AS/400 serial, supplied via the
-// `AS400_DiskSerialNumber` key in [SCSI<n>] sections. When length == 8,
-// applyInjection() uses this value instead of the SD CID / MCU-derived default.
+// Per-SCSI-ID INI-driven overrides for AS/400 inquiry/VPD injections. Each
+// `length` is 0 when no override is configured for that target.
+//
+// AS400_IBMDiskSerialNumber: 6-char IBM short serial (e.g. "0ACD83"). Used
+// directly in VPD page 0xC4 and zero-prefixed to 8 chars in the std INQUIRY
+// IBM-serial slot. When unset, the 6-char form is derived from the first 6
+// bytes returned by as400_get_serial_8().
 static struct {
     uint8_t length;
-    uint8_t data[8];
-} g_as400_serial_override[S2S_MAX_TARGETS];
+    uint8_t data[6];
+} g_as400_ibm_short_serial_override[S2S_MAX_TARGETS];
 
-// Per-SCSI-ID override for the 7-character IBM disk part number (FRU)
-// embedded in VPD page 0x01 at ASCII offset 5 and EBCDIC offset 29.
-// Supplied via the `AS400_DiskPartNumber` key in [SCSI<n>] sections.
-// When length == 7, applyInjection() patches both ASCII and EBCDIC slots.
-// The same value is also used as the profile lookup key.
+// AS400_IBMDiskPartNumber: 7-char IBM FRU (e.g. "53P3239"). Acts as the
+// profile-lookup key as well as the value injected at FRU slots in std
+// INQUIRY and (for DGVS09U) VPD page 0x01.
 static struct {
     uint8_t length;
     uint8_t ascii[7];
     uint8_t ebcdic[7];
-} g_as400_part_override[S2S_MAX_TARGETS];
+} g_as400_ibm_part_override[S2S_MAX_TARGETS];
+
+// AS400_IBMDiskPlantCode: 5-char IBM Type-11S plant + sub-code (e.g.
+// "YL112"). Currently surfaced via the accessor for log/UI synthesis only;
+// not patched into any wire-format field.
+static struct {
+    uint8_t length;
+    uint8_t data[5];
+} g_as400_plant_code_override[S2S_MAX_TARGETS];
+
+// AS400_DiskSerialNumber: 8-char manufacturer (Seagate-style) serial
+// (e.g. "3HX1QZE2"). Used by XCPR036's VPD page 0x80 (offset 4 within the
+// 20-char unit serial). When unset, the captured profile bytes remain.
+static struct {
+    uint8_t length;
+    uint8_t data[8];
+} g_as400_mfr_serial_override[S2S_MAX_TARGETS];
+
+// AS400_DiskPartNumber: up-to-10-char manufacturer disk part number
+// (e.g. "9U9006-026"). Used by XCPR036's VPD page 0xD1 offset 4. Shorter
+// values are right-padded with ASCII spaces; longer values truncated.
+static struct {
+    uint8_t length;
+    uint8_t data[10];
+} g_as400_mfr_part_override[S2S_MAX_TARGETS];
 
 // Convert a single ASCII character to IBM EBCDIC (CP037 subset).
 // Supports digits, uppercase A-Z, and space. Lowercase is uppercased first.
@@ -119,11 +146,72 @@ static bool hasCustomVPD(uint8_t scsiId, uint8_t pageCode)
 }
 
 #ifdef PLATFORM_AS400
+// Public accessors so other code paths (mode.c, image-open) can read the
+// per-target overrides without needing the full custom_vendor_inquiry.h.
+
+extern "C" size_t as400_get_ibm_short_serial(uint8_t scsiId, uint8_t *buf6)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_ibm_short_serial_override[id].length != 6) return 0;
+    memcpy(buf6, g_as400_ibm_short_serial_override[id].data, 6);
+    return 6;
+}
+extern "C" size_t as400_get_mfr_serial(uint8_t scsiId, uint8_t *buf8)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_mfr_serial_override[id].length != 8) return 0;
+    memcpy(buf8, g_as400_mfr_serial_override[id].data, 8);
+    return 8;
+}
+extern "C" size_t as400_get_ibm_fru_ascii(uint8_t scsiId, uint8_t *buf7)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_ibm_part_override[id].length != 7) return 0;
+    memcpy(buf7, g_as400_ibm_part_override[id].ascii, 7);
+    return 7;
+}
+extern "C" size_t as400_get_ibm_fru_ebcdic(uint8_t scsiId, uint8_t *buf7)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_ibm_part_override[id].length != 7) return 0;
+    memcpy(buf7, g_as400_ibm_part_override[id].ebcdic, 7);
+    return 7;
+}
+extern "C" size_t as400_get_mfr_part(uint8_t scsiId, uint8_t *buf, size_t maxlen)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    size_t n = g_as400_mfr_part_override[id].length;
+    if (n == 0) return 0;
+    if (maxlen < 10) return 0;
+    memset(buf, ' ', 10);
+    if (n > 10) n = 10;
+    memcpy(buf, g_as400_mfr_part_override[id].data, n);
+    return 10;
+}
+extern "C" size_t as400_get_plant_code(uint8_t scsiId, uint8_t *buf5)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_plant_code_override[id].length != 5) return 0;
+    memcpy(buf5, g_as400_plant_code_override[id].data, 5);
+    return 5;
+}
+
+// Compute the 6-char IBM short serial for `scsiId`: configured override
+// when present, otherwise the first 6 bytes of as400_get_serial_8(). The
+// caller must provide a 6-byte buffer.
+static void computeIbmShortSerial6(uint8_t scsiId, uint8_t out6[6])
+{
+    if (as400_get_ibm_short_serial(scsiId, out6) == 6) return;
+    uint8_t derived[8];
+    as400_get_serial_8(scsiId, derived);
+    memcpy(out6, derived, 6);
+}
+
 // Apply a single profile-defined injection to a buffer. Bounds-checks the
 // requested offset against the buffer length and silently skips if it would
-// overflow. Serial injections always run (using either the per-target override
-// or the auto-derived SD/MCU value); FRU injections only run when the user has
-// configured AS400_DiskPartNumber for this target.
+// overflow. IBM-serial injections always run (using either a configured
+// override or the auto-derived SD/MCU value); FRU and manufacturer-field
+// injections only run when the corresponding INI override is configured.
 static void applyInjection(uint8_t *data, size_t dataLen,
                            const as400_inject_t *inj, uint8_t scsiId)
 {
@@ -134,24 +222,46 @@ static void applyInjection(uint8_t *data, size_t dataLen,
     case AS400_INJECT_IBM_SERIAL_8:
     {
         if ((size_t)inj->offset + 8 > dataLen) return;
-        uint8_t serial[8];
-        if (g_as400_serial_override[id].length == 8)
-            memcpy(serial, g_as400_serial_override[id].data, 8);
-        else
-            as400_get_serial_8(scsiId, serial);
+        uint8_t serial[8] = { '0', '0', 0, 0, 0, 0, 0, 0 };
+        computeIbmShortSerial6(scsiId, serial + 2);
         memcpy(data + inj->offset, serial, 8);
         break;
     }
+    case AS400_INJECT_IBM_SHORT_SERIAL_6:
+    {
+        if ((size_t)inj->offset + 6 > dataLen) return;
+        uint8_t serial[6];
+        computeIbmShortSerial6(scsiId, serial);
+        memcpy(data + inj->offset, serial, 6);
+        break;
+    }
     case AS400_INJECT_IBM_FRU_ASCII:
-        if (g_as400_part_override[id].length != 7) return;
+        if (g_as400_ibm_part_override[id].length != 7) return;
         if ((size_t)inj->offset + 7 > dataLen) return;
-        memcpy(data + inj->offset, g_as400_part_override[id].ascii, 7);
+        memcpy(data + inj->offset, g_as400_ibm_part_override[id].ascii, 7);
         break;
     case AS400_INJECT_IBM_FRU_EBCDIC:
-        if (g_as400_part_override[id].length != 7) return;
+        if (g_as400_ibm_part_override[id].length != 7) return;
         if ((size_t)inj->offset + 7 > dataLen) return;
-        memcpy(data + inj->offset, g_as400_part_override[id].ebcdic, 7);
+        memcpy(data + inj->offset, g_as400_ibm_part_override[id].ebcdic, 7);
         break;
+    case AS400_INJECT_MFR_SERIAL_8:
+        if (g_as400_mfr_serial_override[id].length != 8) return;
+        if ((size_t)inj->offset + 8 > dataLen) return;
+        memcpy(data + inj->offset, g_as400_mfr_serial_override[id].data, 8);
+        break;
+    case AS400_INJECT_MFR_PART_10:
+    {
+        if (g_as400_mfr_part_override[id].length == 0) return;
+        if ((size_t)inj->offset + 10 > dataLen) return;
+        uint8_t buf[10];
+        memset(buf, ' ', 10);
+        size_t n = g_as400_mfr_part_override[id].length;
+        if (n > 10) n = 10;
+        memcpy(buf, g_as400_mfr_part_override[id].data, n);
+        memcpy(data + inj->offset, buf, 10);
+        break;
+    }
     case AS400_INJECT_NONE:
     default:
         break;
@@ -168,7 +278,6 @@ static void loadAS400Defaults(uint8_t scsiId, S2S_CFG_TYPE type)
     const as400_disk_profile_t *profile = as400_get_active_profile(scsiId);
     bool loaded_default_data = false;
 
-    // Default standard inquiry (SPD) with profile-driven injections applied.
     if (g_custom_spd[scsiId].length == 0 && profile->standardInquiry)
     {
         size_t len = profile->standardInquiryLen;
@@ -182,12 +291,11 @@ static void loadAS400Defaults(uint8_t scsiId, S2S_CFG_TYPE type)
         loaded_default_data = true;
     }
 
-    // Default VPD pages from profile
     for (size_t p = 0; p < profile->vpdPagesLen && g_custom_vpd_count < MAX_CUSTOM_VPD_ENTRIES; p++)
     {
         const as400_vpd_page_t *page = &profile->vpdPages[p];
         if (hasCustomVPD(scsiId, page->pageCode))
-            continue; // INI override takes precedence
+            continue;
 
         loaded_default_data = true;
         int idx = g_custom_vpd_count;
@@ -212,6 +320,42 @@ static void loadAS400Defaults(uint8_t scsiId, S2S_CFG_TYPE type)
                " (profile: ", profile->modelName, ")");
     }
 }
+
+// Trim ASCII spaces from both ends of a NUL-terminated buffer in place.
+static void trimSpaces(char *buf)
+{
+    char *start = buf;
+    while (*start == ' ') ++start;
+    if (start != buf) memmove(buf, start, strlen(start) + 1);
+    size_t n = strlen(buf);
+    while (n > 0 && buf[n - 1] == ' ') buf[--n] = 0;
+}
+
+// Extract the 6-char unit-serial tail from an arbitrary IBM serial input.
+// Accepted forms:
+//   - 6 chars            -> used directly
+//   - 8 chars            -> last 6 chars used (drops "00" prefix)
+//   - 22 chars "11S<FRU>YL<plant><serial>" -> last 6 chars used
+//   - any other length   -> truncated/padded to 6 with trailing spaces
+static void normaliseIbmShortSerial6(const char *in, uint8_t out6[6])
+{
+    size_t inlen = strlen(in);
+    memset(out6, ' ', 6);
+    if (inlen == 0) return;
+    if (inlen >= 6)
+    {
+        memcpy(out6, in + (inlen - 6), 6);
+    }
+    else
+    {
+        memcpy(out6, in, inlen);
+    }
+    for (int i = 0; i < 6; ++i)
+    {
+        char c = (char)out6[i];
+        if (c >= 'a' && c <= 'z') out6[i] = (uint8_t)(c - 'a' + 'A');
+    }
+}
 #endif
 
 void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
@@ -223,8 +367,11 @@ void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
     g_custom_vpd_count = 0;
     memset(g_custom_spd, 0, sizeof(g_custom_spd));
 #ifdef PLATFORM_AS400
-    memset(g_as400_serial_override, 0, sizeof(g_as400_serial_override));
-    memset(g_as400_part_override, 0, sizeof(g_as400_part_override));
+    memset(g_as400_ibm_short_serial_override, 0, sizeof(g_as400_ibm_short_serial_override));
+    memset(g_as400_ibm_part_override,         0, sizeof(g_as400_ibm_part_override));
+    memset(g_as400_plant_code_override,       0, sizeof(g_as400_plant_code_override));
+    memset(g_as400_mfr_serial_override,       0, sizeof(g_as400_mfr_serial_override));
+    memset(g_as400_mfr_part_override,         0, sizeof(g_as400_mfr_part_override));
 #endif
 
     section[4] = scsiEncodeID(scsiId);
@@ -258,62 +405,117 @@ void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
         }
     }
 #ifdef PLATFORM_AS400
-    // Parse AS/400 serial override: AS400_DiskSerialNumber=<up to 8 chars>
-    // Shorter values are right-padded with ASCII spaces; longer values are truncated.
-    if (ini_gets(section, "AS400_DiskSerialNumber", "", tmp, sizeof(tmp), CONFIGFILE))
-    {
-        size_t slen = strlen(tmp);
-        if (slen > 0)
-        {
-            uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
-            memset(g_as400_serial_override[id].data, ' ', 8);
-            if (slen > 8) slen = 8;
-            memcpy(g_as400_serial_override[id].data, tmp, slen);
-            g_as400_serial_override[id].length = 8;
-            logmsg("---- Custom AS/400 serial for SCSI ID ", (int) scsiId, ": \"", tmp, "\"");
-        }
-    }
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
 
-    // Parse AS/400 disk part number override: AS400_DiskPartNumber=<up to 7 chars>
-    // Accepts [0-9 A-Z] (lowercase is uppercased). Shorter values are right-padded
-    // with spaces; longer values are truncated to 7 characters. The same 7 chars
-    // are injected into both the ASCII and EBCDIC slots of the active profile's
-    // FRU-bearing pages, and the value also selects which compiled-in profile is
-    // used (case-insensitive match against `partNumber`); unmatched values fall
-    // back to the default profile.
-    if (ini_gets(section, "AS400_DiskPartNumber", "", tmp, sizeof(tmp), CONFIGFILE))
+    // AS400_IBMDiskPartNumber = <up to 7 chars>
+    // 7-char IBM FRU. Accepts [0-9 A-Z] (lowercase is uppercased); unsupported
+    // characters become space. Shorter values are right-padded with spaces.
+    // The same value is injected into the FRU slots of the active profile's
+    // standard INQUIRY (and, for DGVS09U-style profiles, VPD page 0x01) and
+    // also acts as the profile lookup key.
+    if (ini_gets(section, "AS400_IBMDiskPartNumber", "", tmp, sizeof(tmp), CONFIGFILE))
     {
+        trimSpaces(tmp);
         size_t slen = strlen(tmp);
         if (slen > 0)
         {
-            uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
-            memset(g_as400_part_override[id].ascii, ' ', 7);
-            memset(g_as400_part_override[id].ebcdic, 0x40, 7);
+            memset(g_as400_ibm_part_override[id].ascii,  ' ',  7);
+            memset(g_as400_ibm_part_override[id].ebcdic, 0x40, 7);
             if (slen > 7) slen = 7;
             for (size_t i = 0; i < slen; i++)
             {
                 char c = tmp[i];
                 if (c >= 'a' && c <= 'z') c -= ('a' - 'A');
                 uint8_t eb = asciiToEbcdic(c);
-                g_as400_part_override[id].ascii[i] = (eb == 0x40 && c != ' ') ? ' ' : (uint8_t)c;
-                g_as400_part_override[id].ebcdic[i] = eb;
+                g_as400_ibm_part_override[id].ascii[i]  = (eb == 0x40 && c != ' ') ? ' ' : (uint8_t)c;
+                g_as400_ibm_part_override[id].ebcdic[i] = eb;
             }
-            g_as400_part_override[id].length = 7;
-            logmsg("---- Custom AS/400 disk part number for SCSI ID ", (int) scsiId, ": \"", tmp, "\"");
+            g_as400_ibm_part_override[id].length = 7;
+            logmsg("---- AS400_IBMDiskPartNumber for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
         }
     }
 
-    // Resolve and cache the active profile for this target. The lookup key is
-    // the FRU override the user just configured (NUL-terminated copy in `tmp`),
-    // or NULL when none was provided -> default profile.
+    // AS400_IBMDiskSerialNumber = <6, 8, or 22 chars>
+    // Stored as a 6-char unit serial; the helper normalises common input
+    // shapes (raw 6-char, 8-char zero-padded form, or full 11S barcode form).
+    if (ini_gets(section, "AS400_IBMDiskSerialNumber", "", tmp, sizeof(tmp), CONFIGFILE))
     {
-        uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+        trimSpaces(tmp);
+        size_t slen = strlen(tmp);
+        if (slen > 0)
+        {
+            normaliseIbmShortSerial6(tmp, g_as400_ibm_short_serial_override[id].data);
+            g_as400_ibm_short_serial_override[id].length = 6;
+            logmsg("---- AS400_IBMDiskSerialNumber for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+    }
+
+    // AS400_IBMDiskPlantCode = <5 chars>
+    // Plant + sub-code segment of the IBM Type-11S barcode (e.g. "YL112").
+    // Stored for log/UI synthesis; not patched into any wire-format field.
+    if (ini_gets(section, "AS400_IBMDiskPlantCode", "", tmp, sizeof(tmp), CONFIGFILE))
+    {
+        trimSpaces(tmp);
+        size_t slen = strlen(tmp);
+        if (slen > 0)
+        {
+            memset(g_as400_plant_code_override[id].data, ' ', 5);
+            if (slen > 5) slen = 5;
+            for (size_t i = 0; i < slen; i++)
+            {
+                char c = tmp[i];
+                if (c >= 'a' && c <= 'z') c -= ('a' - 'A');
+                g_as400_plant_code_override[id].data[i] = (uint8_t)c;
+            }
+            g_as400_plant_code_override[id].length = 5;
+            logmsg("---- AS400_IBMDiskPlantCode for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+    }
+
+    // AS400_DiskSerialNumber = <up to 8 chars>
+    // Manufacturer (e.g. Seagate) 8-char disk serial (e.g. "3HX1QZE2").
+    // Right-padded with spaces; truncated when longer. Used by VPD page 0x80
+    // on profiles that carry a manufacturer-format unit serial (XCPR036).
+    if (ini_gets(section, "AS400_DiskSerialNumber", "", tmp, sizeof(tmp), CONFIGFILE))
+    {
+        trimSpaces(tmp);
+        size_t slen = strlen(tmp);
+        if (slen > 0)
+        {
+            memset(g_as400_mfr_serial_override[id].data, ' ', 8);
+            if (slen > 8) slen = 8;
+            memcpy(g_as400_mfr_serial_override[id].data, tmp, slen);
+            g_as400_mfr_serial_override[id].length = 8;
+            logmsg("---- AS400_DiskSerialNumber for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+    }
+
+    // AS400_DiskPartNumber = <up to 10 chars>
+    // Manufacturer 10-char disk part number (e.g. "9U9006-026"). Used by
+    // VPD page 0xD1 on profiles that carry a manufacturer-format part slot.
+    if (ini_gets(section, "AS400_DiskPartNumber", "", tmp, sizeof(tmp), CONFIGFILE))
+    {
+        trimSpaces(tmp);
+        size_t slen = strlen(tmp);
+        if (slen > 0)
+        {
+            memset(g_as400_mfr_part_override[id].data, ' ', 10);
+            if (slen > 10) slen = 10;
+            memcpy(g_as400_mfr_part_override[id].data, tmp, slen);
+            g_as400_mfr_part_override[id].length = (uint8_t)slen;
+            logmsg("---- AS400_DiskPartNumber for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+    }
+
+    // Resolve and cache the active profile for this target. Lookup key is the
+    // 7-char IBM FRU just configured (NUL-terminated, trailing spaces trimmed)
+    // or NULL when no AS400_IBMDiskPartNumber was provided -> default profile.
+    {
         char fru[8] = {0};
         const char *lookup = NULL;
-        if (g_as400_part_override[id].length == 7)
+        if (g_as400_ibm_part_override[id].length == 7)
         {
-            memcpy(fru, g_as400_part_override[id].ascii, 7);
-            // Trim trailing ASCII spaces so " 9L4044" doesn't fail the match.
+            memcpy(fru, g_as400_ibm_part_override[id].ascii, 7);
             for (int i = 6; i >= 0 && fru[i] == ' '; --i) fru[i] = 0;
             lookup = fru;
         }
@@ -321,7 +523,6 @@ void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
         as400_set_active_profile(scsiId, profile);
     }
 
-    // Load AS/400 defaults for any IDs that don't have INI overrides
     loadAS400Defaults(scsiId, type);
 #endif
 }

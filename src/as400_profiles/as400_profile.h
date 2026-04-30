@@ -36,10 +36,37 @@ extern "C" {
  * and the `applyInjection()` switch in custom_vendor_inquiry.cpp. */
 typedef enum {
     AS400_INJECT_NONE = 0,
-    AS400_INJECT_IBM_SERIAL_8,    /* 8-byte IBM short serial (zero-padded form) */
-    AS400_INJECT_IBM_FRU_ASCII,   /* 7-char IBM FRU encoded as plain ASCII      */
-    AS400_INJECT_IBM_FRU_EBCDIC   /* 7-char IBM FRU encoded as EBCDIC (CP037)   */
+    /* 8-byte IBM short serial. Computed as "00" + 6-char IBM short serial
+     * (AS400_IBMDiskSerialNumber). When no override is configured, the 6-char
+     * form is derived from the SD CID / MCU id via as400_get_serial_8(). */
+    AS400_INJECT_IBM_SERIAL_8,
+    /* 6-byte IBM short serial. Same source as IBM_SERIAL_8 but without the
+     * "00" prefix. Used by VPD page 0xC4 on XCPR036-style disks. */
+    AS400_INJECT_IBM_SHORT_SERIAL_6,
+    /* 7-char IBM FRU (AS400_IBMDiskPartNumber). Only injected when the user
+     * has configured the FRU explicitly. */
+    AS400_INJECT_IBM_FRU_ASCII,
+    AS400_INJECT_IBM_FRU_EBCDIC,
+    /* 8-char manufacturer disk serial number (AS400_DiskSerialNumber). Used
+     * by VPD page 0x80 on XCPR036-style disks where the manufacturer's
+     * Seagate-style serial occupies the first 8 chars of a 20-char field. */
+    AS400_INJECT_MFR_SERIAL_8,
+    /* up-to-10-char manufacturer disk part number (AS400_DiskPartNumber).
+     * Right-padded with ASCII spaces. Used by VPD page 0xD1 on XCPR036. */
+    AS400_INJECT_MFR_PART_10
 } as400_inject_field_t;
+
+/* Per-target accessors for INI overrides used by injections. Defined in
+ * src/custom_vendor_inquiry.cpp; surfaced here so future code paths
+ * (image-open, log-sense) can read the same override values without
+ * pulling in custom_vendor_inquiry.h. Each function returns 0 when the
+ * field is unset for `scsiId` and a positive byte length otherwise. */
+size_t as400_get_ibm_short_serial(uint8_t scsiId, uint8_t *buf6);
+size_t as400_get_mfr_serial(uint8_t scsiId, uint8_t *buf8);
+size_t as400_get_ibm_fru_ascii(uint8_t scsiId, uint8_t *buf7);
+size_t as400_get_ibm_fru_ebcdic(uint8_t scsiId, uint8_t *buf7);
+size_t as400_get_mfr_part(uint8_t scsiId, uint8_t *buf, size_t maxlen);
+size_t as400_get_plant_code(uint8_t scsiId, uint8_t *buf5);
 
 typedef struct {
     uint16_t offset;  /* byte offset within the page or SPD blob       */
