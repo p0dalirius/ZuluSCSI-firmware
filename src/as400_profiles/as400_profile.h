@@ -53,7 +53,13 @@ typedef enum {
     AS400_INJECT_MFR_SERIAL_8,
     /* up-to-10-char manufacturer disk part number (AS400_DiskPartNumber).
      * Right-padded with ASCII spaces. Used by VPD page 0xD1 on XCPR036. */
-    AS400_INJECT_MFR_PART_10
+    AS400_INJECT_MFR_PART_10,
+    /* 8-char date of manufacture in MMDDYYYY ASCII form
+     * (AS400_DiskManufacturingDate). When unset via INI, falls back to the
+     * disk image file's FAT creation/modification date. Used by VPD page
+     * 0xC1 on XCPR036-style disks. No-op when the field is unset for the
+     * target. */
+    AS400_INJECT_DOM_8
 } as400_inject_field_t;
 
 /* Per-target accessors for INI overrides used by injections. Defined in
@@ -67,6 +73,13 @@ size_t as400_get_ibm_fru_ascii(uint8_t scsiId, uint8_t *buf7);
 size_t as400_get_ibm_fru_ebcdic(uint8_t scsiId, uint8_t *buf7);
 size_t as400_get_mfr_part(uint8_t scsiId, uint8_t *buf, size_t maxlen);
 size_t as400_get_plant_code(uint8_t scsiId, uint8_t *buf5);
+size_t as400_get_dom(uint8_t scsiId, uint8_t *buf8);
+
+/* Update a target's DOM (date of manufacture, MMDDYYYY) from a derived source
+ * such as the disk image file's FAT timestamp. No-op when the user already
+ * supplied AS400_DiskManufacturingDate via INI for this target, or when the
+ * active profile does not carry a DOM-bearing page (e.g. DGVS09U). */
+void as400_apply_image_dom(uint8_t scsiId, const char *mmddyyyy);
 
 typedef struct {
     uint16_t offset;  /* byte offset within the page or SPD blob       */

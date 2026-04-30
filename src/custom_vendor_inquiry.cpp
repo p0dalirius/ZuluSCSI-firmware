@@ -102,6 +102,16 @@ static struct {
     uint8_t data[10];
 } g_as400_mfr_part_override[S2S_MAX_TARGETS];
 
+// AS400_DiskManufacturingDate: 8-char MMDDYYYY ASCII date of manufacture.
+// `fromIni` is true when the user supplied the date via the INI key; that
+// value pins the slot and prevents the image-file-date fallback from
+// overwriting it. Used by VPD page 0xC1 on XCPR036.
+static struct {
+    uint8_t length;
+    bool    fromIni;
+    uint8_t data[8];
+} g_as400_dom_override[S2S_MAX_TARGETS];
+
 // Convert a single ASCII character to IBM EBCDIC (CP037 subset).
 // Supports digits, uppercase A-Z, and space. Lowercase is uppercased first.
 // Anything else returns EBCDIC space (0x40).
@@ -195,6 +205,50 @@ extern "C" size_t as400_get_plant_code(uint8_t scsiId, uint8_t *buf5)
     memcpy(buf5, g_as400_plant_code_override[id].data, 5);
     return 5;
 }
+extern "C" size_t as400_get_dom(uint8_t scsiId, uint8_t *buf8)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (g_as400_dom_override[id].length != 8) return 0;
+    memcpy(buf8, g_as400_dom_override[id].data, 8);
+    return 8;
+}
+
+// Locate the cached VPD page for `scsiId` and `pageCode` in g_custom_vpd[].
+// Returns the entry index, or -1 if not present.
+static int findCustomVpdEntry(uint8_t scsiId, uint8_t pageCode)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    for (int i = 0; i < g_custom_vpd_count; ++i)
+    {
+        if (g_custom_vpd[i].scsiId == id && g_custom_vpd[i].pageCode == pageCode)
+            return i;
+    }
+    return -1;
+}
+
+extern "C" void as400_apply_image_dom(uint8_t scsiId, const char *mmddyyyy)
+{
+    uint8_t id = scsiId & S2S_CFG_TARGET_ID_BITS;
+    if (id >= S2S_MAX_TARGETS) return;
+    if (g_as400_dom_override[id].fromIni) return;       // INI value pins the slot
+    if (!mmddyyyy) return;
+    if (strlen(mmddyyyy) < 8) return;
+    for (int i = 0; i < 8; ++i)
+    {
+        if (mmddyyyy[i] < '0' || mmddyyyy[i] > '9') return;
+    }
+
+    memcpy(g_as400_dom_override[id].data, mmddyyyy, 8);
+    g_as400_dom_override[id].length = 8;
+    g_as400_dom_override[id].fromIni = false;
+
+    int idx = findCustomVpdEntry(scsiId, 0xC1);
+    if (idx < 0) return;                                 // profile has no page 0xC1
+    if (g_custom_vpd[idx].length < 12) return;
+    memcpy(g_custom_vpd[idx].data + 4, mmddyyyy, 8);
+    logmsg("---- AS/400 DOM auto-derived from image file for SCSI ID ",
+           (int)scsiId, ": \"", mmddyyyy, "\"");
+}
 
 // Compute the 6-char IBM short serial for `scsiId`: configured override
 // when present, otherwise the first 6 bytes of as400_get_serial_8(). The
@@ -262,6 +316,11 @@ static void applyInjection(uint8_t *data, size_t dataLen,
         memcpy(data + inj->offset, buf, 10);
         break;
     }
+    case AS400_INJECT_DOM_8:
+        if (g_as400_dom_override[id].length != 8) return;
+        if ((size_t)inj->offset + 8 > dataLen) return;
+        memcpy(data + inj->offset, g_as400_dom_override[id].data, 8);
+        break;
     case AS400_INJECT_NONE:
     default:
         break;
@@ -413,6 +472,7 @@ void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
     memset(g_as400_plant_code_override,       0, sizeof(g_as400_plant_code_override));
     memset(g_as400_mfr_serial_override,       0, sizeof(g_as400_mfr_serial_override));
     memset(g_as400_mfr_part_override,         0, sizeof(g_as400_mfr_part_override));
+    memset(g_as400_dom_override,              0, sizeof(g_as400_dom_override));
 #endif
 
     section[4] = scsiEncodeID(scsiId);
@@ -545,6 +605,30 @@ void parseCustomInquiryData(uint8_t scsiId, S2S_CFG_TYPE type)
             memcpy(g_as400_mfr_part_override[id].data, tmp, slen);
             g_as400_mfr_part_override[id].length = (uint8_t)slen;
             logmsg("---- AS400_DiskPartNumber for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+    }
+
+    // AS400_DiskManufacturingDate = MMDDYYYY (8 ASCII digits)
+    // Date of manufacture written into VPD page 0xC1 at offset 4. When
+    // unset, scsiDiskOpenHDDImage will fall back to the image file's FAT
+    // creation date (then modification date) via as400_apply_image_dom().
+    if (ini_gets(section, "AS400_DiskManufacturingDate", "", tmp, sizeof(tmp), CONFIGFILE))
+    {
+        trimSpaces(tmp);
+        size_t slen = strlen(tmp);
+        bool ok = (slen == 8);
+        for (size_t i = 0; i < slen && ok; ++i)
+            if (tmp[i] < '0' || tmp[i] > '9') ok = false;
+        if (ok)
+        {
+            memcpy(g_as400_dom_override[id].data, tmp, 8);
+            g_as400_dom_override[id].length  = 8;
+            g_as400_dom_override[id].fromIni = true;
+            logmsg("---- AS400_DiskManufacturingDate for SCSI ID ", (int)scsiId, ": \"", tmp, "\"");
+        }
+        else if (slen > 0)
+        {
+            logmsg("---- WARN: AS400_DiskManufacturingDate must be 8 ASCII digits MMDDYYYY, got: \"", tmp, "\"");
         }
     }
 

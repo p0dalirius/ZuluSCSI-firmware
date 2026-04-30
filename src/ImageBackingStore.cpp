@@ -536,6 +536,32 @@ size_t ImageBackingStore::getFilename(char* buf, size_t buflen)
     return 0;
 }
 
+bool ImageBackingStore::getFatDateMMDDYYYY(char *out, size_t outLen)
+{
+    if (!out || outLen < 9) return false;
+    if (m_israw || m_isrom || m_isfolder) return false;
+    if (!m_fsfile.isOpen()) return false;
+
+    uint16_t fatDate = 0;
+    uint16_t fatTime = 0;
+    if (!m_fsfile.getCreateDateTime(&fatDate, &fatTime) || fatDate == 0)
+    {
+        if (!m_fsfile.getModifyDateTime(&fatDate, &fatTime) || fatDate == 0)
+            return false;
+    }
+
+    int day   = fatDate & 0x1f;
+    int month = (fatDate >> 5) & 0x0f;
+    int year  = ((fatDate >> 9) & 0x7f) + 1980;
+    if (month < 1 || month > 12 || day < 1 || day > 31)
+        return false;
+    if (year < 1980 || year > 2107)
+        return false;
+
+    int written = snprintf(out, outLen, "%02d%02d%04d", month, day, year);
+    return written == 8;
+}
+
 bool ImageBackingStore::selectImageFile(const char *filename)
 {
     if (!m_isfolder)

@@ -54,6 +54,13 @@ constexpr as400_inject_t kPageC4Injections[] = {
     { 4, AS400_INJECT_IBM_SHORT_SERIAL_6 },
 };
 
+// Page 0xC1 carries two MMDDYYYY date fields: DOM at offset 4-11 (date of
+// manufacture, e.g. "11282003") and a service date at offset 12-19 (left
+// at the captured value; not exposed as a tag).
+constexpr as400_inject_t kPageC1Injections[] = {
+    { 4, AS400_INJECT_DOM_8 },
+};
+
 // Page 0xD1 starts with a 10-char manufacturer disk part number
 // (e.g. "9U9006-026") at offset 4.
 constexpr as400_inject_t kPageD1Injections[] = {
@@ -66,7 +73,7 @@ constexpr as400_vpd_page_t kPages[] = {
     { 0x80, sizeof(kPage80), kPage80, kPage80Injections, sizeof(kPage80Injections) / sizeof(kPage80Injections[0]) },
     { 0x81, sizeof(kPage81), kPage81, nullptr,           0 },
     { 0xC0, sizeof(kPageC0), kPageC0, nullptr,           0 },
-    { 0xC1, sizeof(kPageC1), kPageC1, nullptr,           0 },
+    { 0xC1, sizeof(kPageC1), kPageC1, kPageC1Injections, sizeof(kPageC1Injections) / sizeof(kPageC1Injections[0]) },
     { 0xC2, sizeof(kPageC2), kPageC2, nullptr,           0 },
     { 0xC3, sizeof(kPageC3), kPageC3, nullptr,           0 },
     { 0xC4, sizeof(kPageC4), kPageC4, kPageC4Injections, sizeof(kPageC4Injections) / sizeof(kPageC4Injections[0]) },
