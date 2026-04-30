@@ -1,0 +1,28 @@
+DGVS09U profile data provenance
+===============================
+
+These captures were originally hand-assembled in src/as400_values.cpp by
+Kevin Moonlight from a real IBM AS/400 DGVS09U disk reference dump. They
+were extracted into raw .bin form by utils/_extract_dgvs09u.py during the
+introduction of the as400_profile_t framework so that subsequent profiles
+can follow the same `.bin -> .inc` workflow.
+
+Files:
+  standard_inquiry.bin  164 B   IBM AS/400 standard INQUIRY response
+  page_00.bin            12 B   Supported VPD pages list
+  page_01.bin            51 B   Disk part number (IBM FRU)
+  page_03.bin            40 B   Vendor unique configuration
+  page_80.bin            20 B   Unit serial number
+  page_82.bin            52 B   ASCII implemented operating definition
+  page_83.bin            54 B   Device identification
+  page_d1.bin            84 B   IBM FRU/EC parts list
+  page_d2.bin            36 B   IBM EC tracking
+  mode_sense_all.bin    220 B   Mode sense (all pages) response
+
+Vendor:    IBMAS400
+Product:   DGVS09U
+Revision:  02A1
+FRU:       09L4044
+
+Re-run utils/bin_to_inc.py src/as400_profiles/dgvs09u/ after editing any
+.bin file to refresh the corresponding .inc.

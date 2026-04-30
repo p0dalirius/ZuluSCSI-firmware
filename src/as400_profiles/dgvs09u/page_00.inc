@@ -1,0 +1,6 @@
+// Generated from page_00.bin (12 bytes, sha256: 603f5c92e164e9cccf9dd8cfd8eb46220156008c61f39142471b643eeb74bcd9)
+// DO NOT EDIT - re-run utils/bin_to_inc.py
+static const uint8_t kPage00[] = {
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0x03, 0x80,  // 0x0000  ........
+    0x82, 0x83, 0xd1, 0xd2                          // 0x0008  ....
+};
