@@ -28,7 +28,7 @@
 #include "toolbox.h"
 
 #ifdef PLATFORM_AS400
-#include <as400_values.h>
+#include <as400_profiles/as400_profile.h>
 #endif
 
 #include <string.h>
@@ -315,13 +315,19 @@ static void pageIn(int pc, int dataIdx, const uint8_t* pageData, int pageLen)
 static void doModeSense(int sixByteCmd, int dbd, int pc, int pageCode, int allocLength)
 {
 #ifdef PLATFORM_AS400
-	// copy of a raw capture of an AS400 drive
+	// Pull the all-pages mode-sense reply from the active disk profile. The
+	// profile is selected by the `AS400_DiskPartNumber` INI key during boot.
 	if (sixByteCmd && pageCode == 0x3F && scsiDev.target->cfg->quirks == S2S_CFG_QUIRKS_AS400 && scsiDev.target->cfg->deviceType == S2S_CFG_FIXED)
 	{
-		scsiDev.dataLen = as400_mode_sense_all_pages_len > allocLength ? allocLength : as400_mode_sense_all_pages_len;
-		memcpy(scsiDev.data, as400_mode_sense_all_pages, scsiDev.dataLen); 
-		scsiDev.phase = DATA_IN;
-		return;
+		const as400_disk_profile_t *profile = as400_get_active_profile(scsiDev.target->cfg->scsiId);
+		if (profile && profile->modeSenseAllPages && profile->modeSenseAllPagesLen > 0)
+		{
+			size_t len = profile->modeSenseAllPagesLen;
+			scsiDev.dataLen = len > (size_t)allocLength ? (uint32_t)allocLength : (uint32_t)len;
+			memcpy(scsiDev.data, profile->modeSenseAllPages, scsiDev.dataLen);
+			scsiDev.phase = DATA_IN;
+			return;
+		}
 	}
 #endif
 

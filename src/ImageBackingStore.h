@@ -126,6 +126,13 @@ public:
 
     size_t getFilename(char* buf, size_t buflen);
 
+    // Read the underlying file's FAT timestamp into the caller's 9-byte
+    // buffer formatted as "MMDDYYYY\0". Tries the file's create date first
+    // and falls back to the modify date when create is unavailable. Returns
+    // false for raw / ROM / folder backed images, or when both timestamps
+    // are missing or out of FAT's representable range.
+    bool getFatDateMMDDYYYY(char *out, size_t outLen);
+
     // Change image if the image is a folder (used for .cue with multiple .bin)
     bool selectImageFile(const char *filename);
     size_t getFoldername(char* buf, size_t buflen);

@@ -39,6 +39,9 @@
 #include "ZuluSCSI_tape.h"
 #include "ImageBackingStore.h"
 #include "ROMDrive.h"
+#ifdef PLATFORM_AS400
+#include "as400_profiles/as400_profile.h"
+#endif
 #include <new> // For placement new
 #include "QuirksCheck.h"
 #include <minIni.h>
@@ -432,6 +435,17 @@ bool scsiDiskOpenHDDImage(int target_idx, const char *filename, int scsi_lun, in
 
     if (img.file.isOpen())
     {
+#ifdef PLATFORM_AS400
+        // Auto-derive AS/400 DOM (VPD page 0xC1) from the image file's FAT
+        // timestamp when AS400_DiskManufacturingDate was not configured for
+        // this target. No-op for profiles that do not carry a DOM slot
+        // (e.g. DGVS09U) and for non-FAT-backed images (RAW / ROM / folder).
+        char fat_date[9];
+        if (img.file.getFatDateMMDDYYYY(fat_date, sizeof(fat_date)))
+        {
+            as400_apply_image_dom((uint8_t)target_idx, fat_date);
+        }
+#endif
         img.bytesPerSector = blocksize;
         img.scsiSectors = img.file.size() / blocksize;
         img.scsiId = target_idx | S2S_CFG_TARGET_ENABLED;

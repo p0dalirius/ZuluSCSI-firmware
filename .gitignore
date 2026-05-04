@@ -5,3 +5,5 @@ venv
 .ai_instructions
 .claude_project
 .cursorrules
+__pycache__/
+*.pyc
